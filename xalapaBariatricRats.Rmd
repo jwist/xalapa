@@ -1,0 +1,309 @@
+---
+title: "bariatric"
+author: "julien"
+date: "7/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MetaboMate)
+library(hastaLaVista)
+library(car)
+```
+
+
+## bibliotecas
+
+Lo primero es cargar las bibliotecas necesaria. En este caso vamos a usar **Metabomate** desarrollado por Torben Kimhoffer y **hastaLaVista**.
+
+```{r library, include=FALSE}
+library(MetaboMate)
+library(hastaLaVista)
+```
+
+## cargar los datos
+
+Luego vamos a cargar datos. Asumamos que tienen una carpeta con la estructura "Bruker", es decir un expname/expno donde "expname" es el nombre de la carpeta y "exnpo" son carpetas con los numeros de experimentos.
+
+Para este ejemplo, puede descomprimir el archivo BariatricRats.zip que se encuentra en este repositorio. Para cargar los datos, simplemente se llama al comando indicando donde se encuentran los datos.
+
+```{r load}
+readBruker("./BariatricRats")
+```
+El resultado de este comando es crear una variable X y una variable ppm. Para verificar el resultado podemos pintar el primer expectro.
+
+```{r}
+plot(ppm, X[1,], type = "l")
+```
+
+pero advierte que el espectro no se grafica como queremos. Si en vez de usar el comando *plot* de R usamos el comando *spec* de MetaboMate, entonces obtenemos el resultados que esperamos.
+
+```{r}
+spec(ppm, X[1,], shift = range(ppm))
+```
+
+y si queremos concentrarnos en una zona, podemos simplemente indicar los limites
+
+```{r}
+spec(ppm, X[1,], shift = c(-0.1,0.1))
+```
+
+## cargar los metadatos o anotaciones
+
+```{r}
+ann <- read.csv2("./bariatricRats.csv", sep = ",", dec = ".", header = TRUE)
+```
+
+
+## calibración de los espectros 
+
+En general se calibra con respecto a TSP para orina o glucosa para plasma (5.23 ppm), pero eso depende de las aplicaciones, para café usamos TSP para queso?? 
+
+```{r}
+X.cali=calibration(X, ppm, type='Urine')
+```
+
+## verificación de la calidad de los espectros
+
+un muy importante revisar la calidad de los espectros, no entramos en detalles, pero para fluidos humanos, como plasma y orina existen protocolos bastates robustos ya, pero para otras matrices no. En este caso es muy importante evaluar la calidad de los resultados obtenidos.
+
+```{r}
+specOverlay(X.cali, ppm, shift=c(-0.05,0.05), 
+    an=list( 'Facet'=meta$a_RG, # facet
+             'Receiver Gain'=meta$a_RG, # colour
+             'Pulse Program'=meta$a_PULPROG) # linetype
+    )
+```
+
+
+Se pueden usar métodos más completos, para revisar la calidad de la supresión de agua, la calidad de la linea base, y el ancho de banda de alguna señal de referencia, en este caso puede ser TSP.
+
+```{r}
+spec.qc=spec.quality(X.cali, ppm, ppm.noise=c(9.4,9.5), plot=T)
+```
+Aquí la misma información a manera de tabla.
+
+```{r}
+spec.qc
+```
+o a manera de histograma para visualizar la distribución de anchos de banda.
+
+```{r}
+TSP.lw.Hz=spec.qc$"TSP.lw.ppm" * meta$"a_SFO1"
+hist(TSP.lw.Hz, xlab='TSP line width (Hz)', main='Histogram', breaks = "FD", xlim=c(1.5,3.5))
+```
+
+## preparación de los datos
+
+Para analizar los datos es importante quitar ciertas zonas del espectro, en particular la del solvente.
+
+```{r}
+matspec(ppm, X.cali[1:10,], shift = c(4.5,5))
+```
+
+Aquí se suprimen 3 zonas y se verifica el resultado.
+
+
+```{r}
+idx.TSP=get.idx(range=c(min(ppm), 0.5), ppm)
+idx.water=get.idx(range=c(4.6, 5), ppm)
+idx.noiseDF=get.idx(range=c(9.5, max(ppm)), ppm)
+
+X.cali=X.cali[,-c(idx.TSP, idx.water, idx.noiseDF)]
+ppm=ppm[-c(idx.TSP, idx.water, idx.noiseDF)]
+matspec(ppm, X.cali[1:10,], shift = c(4.5,5.1))
+```
+
+se puede hacer una corrección de linea base
+
+```{r}
+X.bl=bline(X.cali)
+# compare spectra before and after baseline correction
+specOverlay(X = X.cali, 
+            ppm = ppm, 
+            shift=c(3,4), 
+            an=list(
+              panel="Not BL corrected", 
+              "SN ratio"=spec.qc$"SN.ratio"),
+              title="Raw"
+            )
+specOverlay(X = X.bl, 
+            ppm = ppm, 
+            shift=c(3,4), 
+            an=list(
+              panel="BL corrected", 
+              "SN ratio"=spec.qc$"SN.ratio"),
+              title="Baseline corrected"
+            )
+```
+
+y una normalización para mermar los efectos de dilución en orina. Esos procesos dependen mucho del diseño experimental y de la matriz. Casi siempre existen varias maneras de normalizar y el resultado varía. Es importante evaluar diferentes estrategías y revisar el resultado. 
+
+
+```{r}
+X.pqn=pqn(X.bl, add.DilF = 'dilF.pqn')
+
+```
+
+
+```{r}
+matspec(ppm, X.pqn, shift = range(ppm))
+matspec(ppm, X.pqn, shift = c(2,4))
+matspec(ppm, X.pqn, shift = c(4,6))
+matspec(ppm, X.pqn, shift = c(6,9))
+```
+
+## estadistica multivariada no supervisada
+
+Lo primero es hacer una PCA.
+
+```{r}
+pca.model=pca(X=X.pqn, pc=2, scale='UV', center=TRUE)
+```
+
+y revisar los scores
+
+```{r}
+plotscores(model=pca.model, pc=c(1,2), an=list("Time Point"=ann$Class), title='PCA - Scores plot')
+```
+
+y los loadings
+
+```{r}
+plotload(pca.model, X.pqn, ppm, pc=2, shift=c(6,9))
+```
+
+
+
+
+```{r}
+
+exploreScores <- function(data, groupName, opt){
+  X <- data$X
+  if (opt['pqn'] == TRUE){
+    Xn=pqn(X)
+  }
+  ppm <- colnames(data$X)
+  metadata <- data$metadata
+  
+  ID <- paste0(data$ID)
+  group <- unlist(data$metadata[groupName])
+  
+  x <- matrix(Xn, dim(X)[1], dim(X)[2])
+  x_axis <- as.numeric( ppm )
+  color = sapply(group, function(x) getColor2(as.character(x)))
+  
+  print(length(color))
+  print(length(group))
+  
+  d = list()
+  c <- data.frame(ID = ID,
+                  group = group,
+                  color = color,
+                  "_highlight" = seq_along(group) - 1,
+                  dataMatrix = I(matrix( c(rbind(repRow(x_axis, nrow(x)), x)), nrow(x), ncol(x)*2)),
+                  metadata = I(metadata),
+                  check.names = FALSE
+  )
+  d <- appendData(data = d, variableName = "data", variable = c, type = "table")
+  d <- appendData(data = d, variableName = "xAxis", variable = x_axis, type = "table")
+  
+  if (opt['correlationMatrix'] == TRUE) {
+    corX <- abs(cor(x))
+    d <- appendData(data = d, variableName = "correlationMatrix", variable = corX, type = "table")
+    cat('correlation matrix computed\n')
+  }
+  
+  if (opt['method'] == 'pca'){
+    mod <- MetaboMate::pca(x)
+    cat('multivariate model computed\n')
+    chart12 <- data.frame("x" = mod@t[,1],
+                          "y" = mod@t[,2],
+                          "highlight" = seq_along(group) - 1,
+                          "info"= factor(ID),
+                          "group" = as.numeric( group ),
+                          "color" = color
+    )
+    d <- appendData( data = d, variableName = "score12", variable = chart12, type = "score")
+    
+    d[['scores']] <- mod@t
+    d[['loadings']] <- cov(mod@t, x)
+    d[['loadingsColor']] <- abs(cor(mod@t, x))
+    
+    ellipse <- dataEllipse(mod@t[,1], mod@t[,2], levels=0.80)
+    
+    ellipseChart <- data.frame("x" = ellipse[,1],
+                               "y" = ellipse[,2],
+                               "color" = rep('black', length(ellipse[,1])))
+    d <- appendData( data = d, variableName = "ellipse", variable = ellipseChart, type = "color")
+  }
+  
+  if (opt['method'] == 'opls') {
+    smod <- MetaboMate::opls(x, group)
+    cat('opls multivariate model computed\n')
+    plotscores(smod, an=list(Class=group), cv.scores = F)
+    plotload(smod, x, ppm, title='oPLS loadings')
+    
+    chart12 <- data.frame("x" = smod@t_pred,
+                          "y" = smod@t_orth[,1],
+                          "highlight" = seq_along(group) - 1,
+                          "info"= ID,
+                          "group" = as.numeric( group ),
+                          "color" = color
+    )
+    
+    plot(smod@t_pred, smod@t_orth[,1])
+    
+    d <- appendData( data = d, variableName = "score12", variable = chart12, type = "score")
+    
+    d[['scores']] <- smod@t_pred
+    d[['loadings']] <- cov(smod@t_pred, x)
+    d[['loadingsColor']] <- abs(cor(smod@t_pred, x))
+    
+    ellipse <- dataEllipse(as.numeric(smod@t_pred), as.numeric(smod@t_orth[,1]), levels=0.80)
+    
+    ellipseChart <- data.frame("x" = ellipse[,1],
+                               "y" = ellipse[,2],
+                               "color" = rep('black', length(ellipse[,1])))
+    d <- appendData( data = d, variableName = "ellipse", variable = ellipseChart, type = "color")
+  }
+  
+  v <- new("visualization")
+  ifelse(is.na(opt['dataFilename']), v@data <- 'data.json', v@data <- unlist(opt['dataFilename']))
+  ifelse(is.na(opt['viewFilename']), v@view <- 'view.json', v@view <- unlist(opt['viewFilename']))
+  push(v, type="data", d)
+  assign("v", v,envir = .GlobalEnv)
+  print(v)
+}
+
+id2filename <- function(id){
+  filename <- gsub("(_)(\\d+)$", " \\2.jdx", id)
+  return(filename)
+}
+
+filename2url <- function(filename){
+  url <- paste0("https://data.cheminfo.org/coffee/", filename)
+  return(url)
+}
+```
+
+
+
+```{r}
+data <- data.frame(ID = ann$ExpNo, X = I(X.bl), metadata = I(ann))
+```
+
+```{r}
+opt <- c('pqn' = TRUE, 
+         'method' = 'pca',
+         'correlationMatrix' = FALSE,
+         'dataFilename' = 'gAndR.data.json',
+         'viewFilename' = 'dataExplorer_1_1.view.json')
+exploreScores(data, "Class" , opt)
+```
+
+```{r}
+visualize(v)
+```
+
